@@ -1,0 +1,76 @@
+name: Changelog Notion Sync
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - test-main
+
+concurrency:
+  group: changelog-notion-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref == 'test-develop'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout test-main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: test-main
+          token: ${{ secrets.CHANGESET_PAT }}
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Read app version from pubspec.yaml
+        id: app_version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed -E 's/version: (.*)/\1/')
+          echo "Current pubspec.yaml version: $VERSION"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and Push GitHub Tag on Merge
+        run: |
+          FULL_VERSION="${{ steps.app_version.outputs.value }}"
+          
+          # Strip out the build number (takes everything before the + sign)
+          VERSION=$(echo "$FULL_VERSION" | cut -d'+' -f1)
+          TAG_NAME="v$VERSION"
+          
+          # Check if the tag already exists to prevent duplicate failures
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists. Skipping tag creation."
+          else
+            echo "Creating tag $TAG_NAME..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@://github.com"
+          
+            git tag -a "$TAG_NAME" -m "Release version $VERSION"
+            git push origin "$TAG_NAME"
+          fi
+
+      - name: Sync updated changelog to Notion
+        continue-on-error: true
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          RELEASE_NAME: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_SHA: HEAD
+          APP_VERSION: ${{ steps.app_version.outputs.value }}
+        run: dart run scripts/changelog_notion_sync.dart
