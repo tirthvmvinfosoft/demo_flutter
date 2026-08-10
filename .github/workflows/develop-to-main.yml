@@ -1,0 +1,58 @@
+name: Develop to Main PR
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: develop-to-main-pr
+  cancel-in-progress: false
+
+jobs:
+  open-release-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Open PR if test-develop is ahead of test-main
+        env:
+          GH_TOKEN: ${{ secrets.CHANGESET_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::CHANGESET_PAT is missing from Repo Secrets."
+            exit 1
+          fi
+
+          # 1. Fetch to ensure we have the latest
+          git fetch origin test-main test-develop
+
+          # 2. Count commits
+          COMMITS_AHEAD=$(git rev-list --count origin/test-main..origin/test-develop)
+          echo "Commits ahead: $COMMITS_AHEAD"
+
+          if [ "$COMMITS_AHEAD" -eq "0" ]; then
+            echo "No new commits — skipping."
+            exit 0
+          fi
+
+          # 3. Check if PR is already open
+          EXISTING_PR=$(gh pr list --head "test-develop" --base "test-main" --json number --jq '.[0].number' --repo "$REPO")
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #$EXISTING_PR is already open. Nothing to do."
+            exit 0
+          fi
+
+          # 4. Create PR
+          echo "Opening release PR..."
+          gh label create "Consolidating Changesets" --repo "$REPO" --color "FBCA04" --force >/dev/null 2>&1 || true
+          
+          gh pr create \
+            --repo "$REPO" \
+            --base test-main --head test-develop \
+            --title "merge test-develop into test-main ($(date +%F))" \
+            --body "Automated release PR (test flow)." \
+            --label "Consolidating Changesets"

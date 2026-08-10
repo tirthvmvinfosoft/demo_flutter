@@ -1,0 +1,99 @@
+name: Changelog Update
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+    branches:
+      - test-main
+  workflow_dispatch: {}
+
+concurrency:
+  group: changelog-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.head.ref == 'test-develop' &&
+      github.actor != 'github-actions[bot]' &&
+      github.actor != 'github-actions'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.CHANGESET_PAT }}
+
+      - name: Check whether the last commit is our own changelog commit
+        id: check
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          echo "Last commit message: $MSG"
+
+          if [[ "$MSG" == "chore(repo): update changelogs on develop"* ]]; then
+            echo "This is our own changelog commit — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Flutter
+        if: steps.check.outputs.skip != 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: flutter pub get
+
+      # Generate and commit CHANGELOG.md directly onto the PR head branch (test-develop)
+      # This naturally moves to test-main upon clicking merge!
+      - name: Generate and Commit Changelog on PR
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git fetch origin test-main:test-main
+          MERGE_BASE=$(git merge-base test-main HEAD)
+
+          RELEASE_TITLE="$(date +%F)"
+          
+          echo "Generating final changelog text..."
+          dart run scripts/generate_changelog.dart "$MERGE_BASE" "$RELEASE_TITLE"
+          
+          if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore(repo): update changelogs on develop"
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          else
+            echo "No changelog changes detected."
+          fi
+
+      - name: Mark consolidation complete
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          gh label create "Changesets Complete" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --force >/dev/null 2>&1 || true
+          gh label create "Ready to merge" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --force >/dev/null 2>&1 || true
+          
+          echo "Clearing out the initial consolidation state label..."
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "Consolidating Changesets" || true
+          
+          sleep 2
+          
+          echo "Applying clean green target release labels..."
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "Changesets Complete" --add-label "Ready to merge" || true
